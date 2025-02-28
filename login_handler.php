@@ -1,34 +1,35 @@
 <?php
-// handler/login_handler.php
+// login_handler.php
 
 session_start();
-require '../config.php'; // Assurez-vous que config.php est bien à la racine
+require 'config.php';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    // Récupération des données et nettoyage
+    // Récupération des données du formulaire en nettoyant le username
     $username = trim($_POST['username'] ?? '');
     $password = $_POST['password'] ?? '';
     
+    // Vérifier que tous les champs sont remplis
     if (empty($username) || empty($password)) {
         die("Tous les champs sont requis.");
     }
     
-    // Requête pour trouver l'utilisateur dans la table users
+    // Recherche de l'utilisateur dans la table users
     $stmt = $pdo->prepare("SELECT * FROM users WHERE username = :username");
     $stmt->execute([':username' => $username]);
     $user = $stmt->fetch(PDO::FETCH_ASSOC);
     
-    // Vérification du mot de passe
+    // Vérifier si l'utilisateur existe et si le mot de passe est correct
     if ($user && password_verify($password, $user['password'])) {
-        // Authentification réussie, enregistrement dans la session
+        // Authentification réussie : on stocke l'utilisateur dans la session
         $_SESSION['user'] = $user;
-        header("Location: ../menu.php"); // Redirection vers le menu (à la racine)
+        header("Location: menu.php");
         exit();
     } else {
         die("Nom d'utilisateur ou mot de passe incorrect.");
     }
 } else {
-    header("Location: ../index.html");
+    header("Location: index.html");
     exit();
 }
 ?>

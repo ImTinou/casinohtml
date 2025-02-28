@@ -1,0 +1,16 @@
+# .htaccess
+
+# (Optionnel) Forcer l'utilisation du handler PHP pour les fichiers .php
+<FilesMatch "\.php$">
+    SetHandler application/x-httpd-php
+</FilesMatch>
+
+# Désactiver l'indexation des répertoires pour des raisons de sécurité
+Options -Indexes
+
+# Définir le charset par défaut en UTF-8
+AddDefaultCharset UTF-8
+
+# Gestion des erreurs personnalisées
+ErrorDocument 404 /404.html
+ErrorDocument 500 /500.html
