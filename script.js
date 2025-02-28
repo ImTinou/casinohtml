@@ -11,6 +11,7 @@ const SEGMENT_DISTRIBUTION = {
     'crazy-time': 3  // 3 segments Crazy Time
 };
 
+
 const SEGMENT_COLORS = {
     'x1': 0x95a5a6,
     'x2': 0xe74c3c,
@@ -1708,6 +1709,12 @@ const gsap = {
         }
     }
 };
+
+import { inject } from '@vercel/analytics';
+
+// Activer l'analyse
+inject();
+
 
 // Lancer le jeu
 window.addEventListener('load', initGame);
