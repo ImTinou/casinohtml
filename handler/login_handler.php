@@ -29,7 +29,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         die("Nom d'utilisateur ou mot de passe incorrect.");
     }
 } else {
-    header("Location: login.html");
+    header("Location: index.html");
     exit();
 }
 ?>

@@ -26,14 +26,14 @@ if ($_SERVER['REQUEST_METHOD'] == 'POST') {
             ':email'    => $email,
             ':password' => $hashedPassword
         ]);
-        // Redirigez vers la page de connexion (login.html) après inscription réussie
-        header("Location: login.html");
+        // Redirigez vers la page de connexion (index.html) après inscription réussie
+        header("Location: index.html");
         exit;
     } catch(PDOException $e) {
         die("Erreur lors de la création du compte: " . $e->getMessage());
     }
 } else {
-    header("Location: login.html");
+    header("Location: index.html");
     exit;
 }
 ?>
