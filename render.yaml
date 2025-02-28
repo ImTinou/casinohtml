@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: casino
+    env: php
+    plan: free
+    buildCommand: ""        # Laisser vide si vous n'avez pas de commande de build
+    startCommand: "php -S 0.0.0.0:$PORT"
