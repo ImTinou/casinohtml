@@ -14,3 +14,6 @@ AddDefaultCharset UTF-8
 # Gestion des erreurs personnalisées
 ErrorDocument 404 /404.html
 ErrorDocument 500 /500.html
+
+# Définir la page d'accueil par défaut
+DirectoryIndex crazy/index.html

@@ -35,7 +35,8 @@ const SEGMENT_LABELS = {
 
 // État du jeu
 let gameState = {
-    balance: 1000,
+    userId: userData ? userData.id : 0,
+    balance: userData ? userData.initialBalance : 1000,
     currentChip: 10,
     bets: {
         'x1': 0,
@@ -70,6 +71,39 @@ let gameState = {
     nextBonus: '--',
     history: []
 };
+
+// Fonction pour mettre à jour le solde dans la base de données
+async function serverUpdateTransaction(amount, isWin) {
+    try {
+        const response = await fetch('update_balance.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                userId: gameState.userId,
+                amount: amount,
+                isWin:  isWin
+            }),
+        });
+        const data = await response.json();
+
+        if (!data.success) {
+            console.error('Erreur BDD:', data.message);
+            alert(data.message || 'Erreur update_balance.php');
+            return false;
+        }
+
+        // Le serveur renvoie la VRAIE nouvelle balance
+        gameState.balance = data.newBalance;
+        updateUI(); // Réactualise l'affichage
+        return true;
+
+    } catch (error) {
+        console.error('Erreur réseau:', error);
+        alert('Connexion serveur impossible.');
+        return false;
+    }
+}
+
 
 // Initialisation de PIXI.js
 const app = new PIXI.Application({
@@ -191,7 +225,7 @@ function createSegment(angle, color, label, type) {
     text.position.set(x, y);
     
     // Rotation du texte pour qu'il soit lisible (perpendiculaire au rayon)
-    text.rotation = Math.PI / 2 + textAngle;
+    text.rotation = Math.PI /.2 + textAngle;
     
     container.addChild(text);
     
@@ -226,7 +260,7 @@ function createSegment(angle, color, label, type) {
                 iconText = '🎯';
                 break;
             case 'coin-flip':
-                iconText = '🪙';
+                iconText = '💰';
                 break;
             case 'pachinko':
                 iconText = '🎪';
@@ -449,28 +483,45 @@ function normalizeAngle(angle) {
 }
 
 // Lancement de la roue
-function spinWheel() {
-    if (!gameState.isSpinning) {
-        // Vérifier si le joueur a assez d'argent
-        if (gameState.totalBet > gameState.balance) {
-            alert("Votre solde est insuffisant !");
-            return;
-        }
-        
-        // Vérifier s'il y a au moins une mise
-        if (gameState.totalBet === 0) {
-            alert("Veuillez placer au moins une mise avant de tourner la roue !");
-            return;
-        }
-        
-        // Sauvegarder les mises actuelles pour la fonction "remiser"
-        saveBets();
+async function spinWheel() {
+    if (gameState.isSpinning) return;
+
+    // Vérifier solde local et mise
+    if (gameState.totalBet <= 0) {
+        alert("Veuillez placer au moins une mise !");
+        return;
+    }
+    if (gameState.totalBet > gameState.balance) {
+        alert("Votre solde est insuffisant !");
+        return;
+    }
+
+    // Sauvegarder les mises
+    saveBets();
+
+    // APPEL SERVEUR pour retirer la mise
+    const success = await serverUpdateTransaction(gameState.totalBet, false); 
+    if (!success) {
+        // Si échec, on arrête tout
+        return;
+    }
         
         gameState.isSpinning = true;
         gameState.spinSpeed = 15 + Math.random() * 10; // Vitesse aléatoire
         
         // Déduire les mises du solde
+        const oldBalance = gameState.balance;
         gameState.balance -= gameState.totalBet;
+        
+        // Mettre à jour le solde dans la base de données (mise)
+        const updateSuccess = await updateBalanceInDatabase(gameState.balance, gameState.totalBet, false);
+        
+        // En cas d'échec de mise à jour BDD, revenir à l'état précédent
+        if (!updateSuccess) {
+            gameState.balance = oldBalance;
+            gameState.isSpinning = false;
+            return;
+        }
         
         // Désactiver le bouton spin pendant la rotation
         document.getElementById('spin-btn').disabled = true;
@@ -484,7 +535,6 @@ function spinWheel() {
         // Mettre à jour l'interface
         updateUI();
     }
-}
 
 // Fonction pour sauvegarder les mises actuelles
 function saveBets() {
@@ -496,7 +546,7 @@ function saveBets() {
 }
 
 // Fonction pour remettre les mises précédentes
-function reBet() {
+async function reBet() {
     // Vérifier s'il y a des mises précédentes
     if (gameState.previousTotalBet === 0) {
         alert("Pas de mises précédentes à reproduire !");
@@ -536,64 +586,58 @@ function reBet() {
 }
 
 // Traitement du résultat
-function processResult(segmentType) {
-    // Mise à jour du dernier résultat
+async function processResult(segmentType) {
     gameState.lastResult = SEGMENT_LABELS[segmentType];
-    
-    // Vérifier si le joueur a gagné
+
     if (gameState.bets[segmentType] > 0) {
         let winAmount = 0;
-        
-        // Calcul des gains en fonction du type de segment
         switch (segmentType) {
-            case 'x1':
-                winAmount = gameState.bets[segmentType] * 1;
-                break;
-            case 'x2':
-                winAmount = gameState.bets[segmentType] * 2;
-                break;
-            case 'x5':
-                winAmount = gameState.bets[segmentType] * 5;
-                break;
-            case 'x10':
-                winAmount = gameState.bets[segmentType] * 10;
-                break;
+            case 'x1':  winAmount = gameState.bets[segmentType] * 1;  break;
+            case 'x2':  winAmount = gameState.bets[segmentType] * 2;  break;
+            case 'x5':  winAmount = gameState.bets[segmentType] * 5;  break;
+            case 'x10': winAmount = gameState.bets[segmentType] * 10; break;
             case 'cash-hunt':
             case 'coin-flip':
             case 'pachinko':
             case 'crazy-time':
-                // Lancer le jeu bonus
+                // Lancer le bonus => NE PAS MODIFIER LA BALANCE ICI
                 startBonusGame(segmentType);
-                return; // Sortir de la fonction pour traiter le bonus séparément
+                return;
         }
-        
-        // Ajouter les gains au solde
-        gameState.balance += winAmount;
+
+        // APPEL SERVEUR => gain
+        const success = await serverUpdateTransaction(winAmount, true);
+        if (!success) {
+            resetForNextRound();
+            return;
+        }
+
+        // On ne modifie plus gameState.balance ici
+        // Le serveur renvoie la newBalance
+
         gameState.lastWin = winAmount;
-        
-        // Afficher l'animation de gain
         showWinAnimation(winAmount);
+
     } else {
+        // Joueur n'a pas misé sur ce segment
         gameState.lastWin = 0;
         document.getElementById('last-win').textContent = "0€";
-        
-        // Réinitialiser pour le prochain tour
         resetForNextRound();
     }
-    
-    // Mettre à jour l'historique
+
+    // Historique etc.
     gameState.history.unshift(segmentType);
     if (gameState.history.length > 10) {
         gameState.history.pop();
     }
-    
-    // Activer le bouton remiser
+
+    // Réactiver Rebet
     document.getElementById('rebet-btn').disabled = false;
     document.getElementById('rebet-btn').style.opacity = "1";
-    
-    // Mettre à jour l'interface
+
     updateUI();
 }
+
 
 // Afficher l'animation de gain
 function showWinAnimation(amount) {
@@ -721,7 +765,7 @@ function setupCashHunt(container) {
         tile.innerHTML = `<span style="font-size: 2.5rem;">${symbol.emoji}</span>`;
         tile.dataset.multiplier = multipliers[i];
         
-        tile.addEventListener('click', function() {
+        tile.addEventListener('click', async function() {
             // Désactiver tous les tiles
             const allTiles = document.querySelectorAll('.cash-hunt-tile');
             allTiles.forEach(t => {
@@ -745,8 +789,11 @@ function setupCashHunt(container) {
             const winAmount = betAmount * multiplier;
             
             // Ajouter le gain au solde
-            gameState.balance += winAmount;
+            await serverUpdateTransaction(winAmount, true);
             gameState.lastWin = winAmount;
+            
+            // Mettre à jour le solde dans la base de données
+            await updateBalanceInDatabase(gameState.balance, 0, true);
             
             // Afficher le résultat
             setTimeout(() => {
@@ -824,7 +871,7 @@ function setupCoinFlip(container) {
     `;
     
     // Attachement de l'événement pour lancer la pièce
-    document.getElementById('flip-btn').addEventListener('click', function() {
+    document.getElementById('flip-btn').addEventListener('click', async function() {
         this.disabled = true;
         this.style.opacity = '0.5';
         
@@ -835,15 +882,18 @@ function setupCoinFlip(container) {
         coin.style.transform = `rotateY(${720 + (isHeads ? 0 : 180)}deg)`;
         
         // Calculer les gains
-        setTimeout(() => {
+        setTimeout(async () => {
             const winMultiplier = isHeads ? redMultiplier : blueMultiplier;
             // Si c'est un test, utilisez une mise par défaut
             const betAmount = gameState.bets['coin-flip'] || 50;
             const winAmount = betAmount * winMultiplier;
             
             // Ajouter le gain au solde
-            gameState.balance += winAmount;
+            await serverUpdateTransaction(winAmount, true);
             gameState.lastWin = winAmount;
+            
+            // Mettre à jour le solde dans la base de données
+            await updateBalanceInDatabase(gameState.balance, 0, true);
             
             // Afficher le résultat
             const resultDiv = document.createElement('div');
@@ -880,20 +930,137 @@ function setupCoinFlip(container) {
 function setupPachinko(container) {
     container.innerHTML = `
         <div style="text-align: center; padding: 1rem;">
-            <h3 style="margin-bottom: 1.5rem; color: #f1c40f;">Le palet va être lâché sur le mur de Pachinko!</h3>
+            <h3 style="margin-bottom: 1.5rem; color: #f1c40f; text-shadow: 0 0 10px rgba(241, 196, 15, 0.5);">
+                Le palet va être lâché sur le mur de Pachinko!
+            </h3>
             
-            <div id="pachinko-board">
+            <div id="pachinko-board" style="box-shadow: 0 0 30px rgba(26, 188, 156, 0.5); border: 2px solid #16a085; overflow: hidden;">
                 <div id="puck"></div>
                 <div id="multipliers"></div>
+                
+                <!-- Éléments décoratifs pour le Pachinko -->
+                <div style="position: absolute; top: 15px; left: 15px; font-size: 24px; color: rgba(255,255,255,0.2);">🎪</div>
+                <div style="position: absolute; top: 15px; right: 15px; font-size: 24px; color: rgba(255,255,255,0.2);">🎪</div>
+                <div style="position: absolute; top: 10px; left: 50%; transform: translateX(-50%); font-size: 16px; color: rgba(255,255,255,0.5); font-weight: bold;">PACHINKO</div>
+                <div class="pachinko-light" style="position: absolute; top: 5px; left: 5px; width: 8px; height: 8px; background: #e74c3c; border-radius: 50%;"></div>
+                <div class="pachinko-light" style="position: absolute; top: 5px; right: 5px; width: 8px; height: 8px; background: #3498db; border-radius: 50%;"></div>
             </div>
             
-            <button class="bonus-btn" id="drop-btn" style="margin-top: 1.5rem;">LÂCHER LE PALET</button>
+            <button class="bonus-btn" id="drop-btn" style="margin-top: 1.5rem; background: linear-gradient(to right, #16a085, #1abc9c); animation: pulse-button 2s infinite;">LÂCHER LE PALET</button>
         </div>
+        
+        <style>
+            /* Styles spécifiques au Pachinko */
+            #pachinko-board {
+                width: 90%;
+                height: 450px;
+                margin: 2rem auto;
+                background: linear-gradient(to bottom, #2c3e50, #1a1a2e);
+                position: relative;
+                border-radius: 15px;
+            }
+            
+            #puck {
+                width: 22px;
+                height: 22px;
+                background: radial-gradient(circle, #f1c40f, #f39c12);
+                border-radius: 50%;
+                position: absolute;
+                top: 0;
+                left: 50%;
+                transform: translateX(-50%);
+                box-shadow: 0 0 15px rgba(241, 196, 15, 0.8);
+                z-index: 20;
+            }
+            
+            #multipliers {
+                display: flex;
+                position: absolute;
+                bottom: 0;
+                width: 100%;
+                height: 70px;
+            }
+            
+            #multipliers div {
+                flex: 1;
+                height: 100%;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-weight: bold;
+                font-size: 1.2rem;
+                border-right: 1px solid rgba(255, 255, 255, 0.1);
+                border-top: 3px solid rgba(255, 255, 255, 0.2);
+                transition: all 0.3s ease;
+            }
+            
+            #multipliers div:last-child {
+                border-right: none;
+            }
+            
+            #multipliers div:hover {
+                transform: translateY(-3px);
+                box-shadow: 0 -5px 10px rgba(0, 0, 0, 0.3);
+            }
+            
+            .peg {
+                position: absolute;
+                width: 12px;
+                height: 12px;
+                background: radial-gradient(circle, #ecf0f1, #bdc3c7);
+                border-radius: 50%;
+                box-shadow: 0 0 5px rgba(0, 0, 0, 0.3);
+                z-index: 10;
+            }
+            
+            @keyframes peg-pulse {
+                0% { transform: scale(1); box-shadow: 0 0 3px rgba(255, 255, 255, 0.5); }
+                50% { transform: scale(1.1); box-shadow: 0 0 8px rgba(255, 255, 255, 0.8); }
+                100% { transform: scale(1); box-shadow: 0 0 3px rgba(255, 255, 255, 0.5); }
+            }
+            
+            @keyframes pulse-button {
+                0% { transform: scale(1); }
+                50% { transform: scale(1.05); }
+                100% { transform: scale(1); }
+            }
+            
+            .pachinko-light {
+                animation: blink 1.5s infinite alternate;
+            }
+            
+            @keyframes blink {
+                0% { opacity: 0.4; }
+                100% { opacity: 1; }
+            }
+            
+            .trail {
+                position: absolute;
+                width: 8px;
+                height: 8px;
+                background: rgba(241, 196, 15, 0.6);
+                border-radius: 50%;
+                z-index: 5;
+                pointer-events: none;
+            }
+        </style>
     `;
     
     // Générer les multiplicateurs pour le bas du tableau
     const multiplierContainer = document.getElementById('multipliers');
     const multipliers = [];
+    
+    // Couleurs pour les multiplicateurs
+    const colorClasses = [
+        {bg: '#3498db', text: 'white'}, // bleu
+        {bg: '#e74c3c', text: 'white'}, // rouge
+        {bg: '#2ecc71', text: 'white'}, // vert
+        {bg: '#9b59b6', text: 'white'}, // violet
+        {bg: '#f39c12', text: 'black'}, // orange/jaune
+        {bg: '#1abc9c', text: 'white'}, // turquoise
+        {bg: '#e67e22', text: 'white'}, // orange foncé
+        {bg: '#f1c40f', text: 'black'}  // jaune
+    ];
     
     // Générer des multiplicateurs selon la distribution souhaitée
     for (let i = 0; i < 8; i++) {
@@ -914,39 +1081,77 @@ function setupPachinko(container) {
         
         multipliers.push(multiplier);
         
+        const color = colorClasses[i % colorClasses.length];
+        const isSpecial = multiplier === "DOUBLE" || multiplier >= 200;
+        
         const multDiv = document.createElement('div');
         multDiv.style.flex = '1';
-        multDiv.style.backgroundColor = multiplier === "DOUBLE" ? '#f39c12' : '#3498db';
+        multDiv.style.backgroundColor = isSpecial ? '#f39c12' : color.bg;
+        multDiv.style.color = isSpecial ? 'black' : color.text;
+        multDiv.style.transition = 'all 0.3s ease';
+        multDiv.style.cursor = 'pointer';
+        
+        // Style spécial pour les valeurs élevées
+        if (isSpecial) {
+            multDiv.style.fontWeight = 'bold';
+            multDiv.style.boxShadow = 'inset 0 0 15px rgba(255, 255, 255, 0.3)';
+        }
+        
         multDiv.textContent = multiplier === "DOUBLE" ? "DOUBLE" : `x${multiplier}`;
         multDiv.dataset.multiplier = multiplier;
+        
+        // Effet de survol
+        multDiv.addEventListener('mouseenter', function() {
+            this.style.transform = 'translateY(-5px)';
+            this.style.boxShadow = '0 -5px 15px rgba(0, 0, 0, 0.5)';
+        });
+        
+        multDiv.addEventListener('mouseleave', function() {
+            this.style.transform = 'translateY(0)';
+            this.style.boxShadow = 'none';
+        });
         
         multiplierContainer.appendChild(multDiv);
     }
     
     // Générer les chevilles du Pachinko
     const board = document.getElementById('pachinko-board');
-    const pegRows = 5;
-    const pegsPerRow = 7;
+    const pegRows = 6; // Plus de rangées
+    const pegsPerRow = 9; // Plus de chevilles par rangée
+    const pegs = [];
     
     for (let row = 0; row < pegRows; row++) {
         for (let col = 0; col < (row % 2 === 0 ? pegsPerRow : pegsPerRow - 1); col++) {
             const peg = document.createElement('div');
-            peg.style.width = '10px';
-            peg.style.height = '10px';
-            peg.style.backgroundColor = '#ecf0f1';
-            peg.style.borderRadius = '50%';
-            peg.style.position = 'absolute';
+            peg.className = 'peg';
             
             // Calcul de la position en fonction de la rangée et de la colonne
             const xOffset = row % 2 === 0 ? 0 : (board.clientWidth / pegsPerRow) / 2;
-            const pegSpacing = board.clientWidth / pegsPerRow;
-            const x = xOffset + col * pegSpacing;
+            const pegSpacing = board.clientWidth / (pegsPerRow + 1);
+            const x = xOffset + (col + 1) * pegSpacing; // +1 pour éviter les bords
             const y = 60 + row * 60;
             
             peg.style.left = `${x}px`;
             peg.style.top = `${y}px`;
             
+            // Animation aléatoire pour certaines chevilles
+            if (Math.random() < 0.2) {
+                peg.style.animation = `peg-pulse ${2 + Math.random() * 3}s infinite`;
+                peg.style.animationDelay = `${Math.random() * 2}s`;
+            }
+            
+            // Taille légèrement variable pour plus de naturel
+            const size = 10 + Math.random() * 4;
+            peg.style.width = `${size}px`;
+            peg.style.height = `${size}px`;
+            
             board.appendChild(peg);
+            pegs.push({
+                element: peg,
+                x: x,
+                y: y,
+                radius: size/2
+            });
         }
     }
     
@@ -954,81 +1159,219 @@ function setupPachinko(container) {
     document.getElementById('drop-btn').addEventListener('click', function() {
         this.disabled = true;
         this.style.opacity = '0.5';
+        this.style.animation = 'none';
         
         const puck = document.getElementById('puck');
         const boardRect = board.getBoundingClientRect();
         const multiplierDivs = document.querySelectorAll('#multipliers div');
         const multiplierWidth = multiplierDivs[0].offsetWidth;
         
-        // Animation de chute du palet avec rebonds aléatoires
+        // Jouer un son au début (si supporté)
+        playSound('drop');
+        
+        // Animation de chute du palet avec rebonds améliorés
         let posX = boardRect.width / 2;
         let posY = 0;
         let velocityX = 0;
         let velocityY = 2;
+        let gravity = 0.2;
+        let friction = 0.98;
+        let dampening = 0.75; // Amortissement des rebonds
+        let trails = []; // Tableau pour stocker les traces de la balle
+        
+        function createTrail(x, y) {
+            if (Math.random() < 0.3) { // Ne pas créer une trace à chaque frame
+                const trail = document.createElement('div');
+                trail.className = 'trail';
+                trail.style.left = `${x}px`;
+                trail.style.top = `${y}px`;
+                board.appendChild(trail);
+                
+                // Animer la disparition de la trace
+                setTimeout(() => {
+                    trail.style.opacity = '0';
+                    setTimeout(() => {
+                        trail.remove();
+                    }, 300);
+                }, 100);
+                
+                trails.push(trail);
+            }
+        }
+        
+        function playSound(type) {
+            // Simuler un son (pourrait être remplacé par de vrais sons)
+            try {
+                let audio;
+                switch(type) {
+                    case 'drop':
+                        audio = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADwADMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAADwIxTDeleteRegularStart+c0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//vQZAAP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAETEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV');
+                        break;
+                    case 'hit':
+                        audio = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADwADMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAADwIxTDeleteRegularStart+c0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//vQZAAP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAETEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV');
+                        break;
+                    case 'win':
+                        audio = new Audio('data:audio/mp3;base64,SUQzBAAAAAAAI1RTU0UAAAAPAAADTGF2ZjU4LjI5LjEwMAAAAAAAAAAAAAAA//tQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWGluZwAAAA8AAAACAAADwADMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM//////////////////////////////////////////////////////////////////8AAAAATGF2YzU4LjU0AAAAAAAAAAAAAAAAJAAAAAAAAAADwIxTDeleteRegularStart+c0AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//vQZAAP8AAAaQAAAAgAAA0gAAABAAABpAAAACAAADSAAAAETEFNRTMuMTAwVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVV');
+                        break;
+                }
+                if (audio) {
+                    audio.volume = 0.2; // Volume bas
+                    audio.play().catch(e => console.log("Son non joué:", e));
+                }
+            } catch (e) {
+                console.log("Erreur de son:", e);
+            }
+        }
+        
+        function checkPegCollision() {
+            let collision = false;
+            
+            // Vérifier la collision avec chaque cheville
+            for (let i = 0; i < pegs.length; i++) {
+                const peg = pegs[i];
+                const dx = posX - peg.x;
+                const dy = posY - peg.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                const minDistance = 11 + peg.radius; // Rayon du palet (11px) + rayon de la cheville
+                
+                if (distance < minDistance) {
+                    // Calculer l'angle du vecteur entre le palet et la cheville
+                    const angle = Math.atan2(dy, dx);
+                    
+                    // Ajuster la position pour éviter que le palet ne reste "collé" à la cheville
+                    posX = peg.x + Math.cos(angle) * minDistance;
+                    posY = peg.y + Math.sin(angle) * minDistance;
+                    
+                    // Calculer les nouvelles vélocités en fonction de l'angle d'impact
+                    const speed = Math.sqrt(velocityX * velocityX + velocityY * velocityY);
+                    const directionX = Math.cos(angle);
+                    const directionY = Math.sin(angle);
+                    
+                    // Ajouter une composante aléatoire pour plus de réalisme
+                    velocityX = directionX * speed * dampening + (Math.random() - 0.5) * 0.5;
+                    velocityY = directionY * speed * dampening + (Math.random() - 0.5) * 0.5;
+                    
+                    // Donner un effet visuel à la cheville touchée
+                    peg.element.style.animation = 'peg-pulse 0.5s';
+                    setTimeout(() => {
+                        peg.element.style.animation = '';
+                    }, 500);
+                    
+                    // Jouer un son de collision
+                    playSound('hit');
+                    
+                    collision = true;
+                    break;
+                }
+            }
+            
+            return collision;
+        }
         
         function animate() {
-            // Mise à jour de la position
+            // Créer une trace de la trajectoire
+            createTrail(posX, posY);
+            
+            // Vérifier les collisions avec les chevilles
+            const hasCollided = checkPegCollision();
+            
+            // Appliquer la gravité
+            velocityY += gravity;
+            
+            // Appliquer la friction
+            velocityX *= friction;
+            velocityY *= friction;
+            
+            // Mettre à jour la position
             posX += velocityX;
             posY += velocityY;
             
             // Collision avec les bords
-            if (posX < 10) {
-                posX = 10;
-                velocityX = Math.abs(velocityX) * 0.8;
-            } else if (posX > boardRect.width - 10) {
-                posX = boardRect.width - 10;
-                velocityX = -Math.abs(velocityX) * 0.8;
-            }
-            
-            // Augmentation de la vitesse de chute
-            velocityY += 0.2;
-            
-            // Simuler des rebonds aléatoires sur les chevilles
-            if (posY < boardRect.height - 70 && Math.random() < 0.1) {
-                velocityX += (Math.random() - 0.5) * 3;
+            if (posX < 11) {
+                posX = 11;
+                velocityX = Math.abs(velocityX) * dampening;
+                playSound('hit');
+            } else if (posX > boardRect.width - 11) {
+                posX = boardRect.width - 11;
+                velocityX = -Math.abs(velocityX) * dampening;
+                playSound('hit');
             }
             
             // Mise à jour de la position du palet
             puck.style.left = `${posX}px`;
             puck.style.top = `${posY}px`;
             
+            // Effet de rotation (simulé par une transformation CSS)
+            const rotation = (posX % 30) - 15; // Rotation légère basée sur la position X
+            puck.style.transform = `translateX(-50%) rotate(${rotation}deg)`;
+            
             // Vérifier si le palet a atteint le bas
-            if (posY >= boardRect.height - 25) {
-                posY = boardRect.height - 25;
-                
+            if (posY >= boardRect.height - 80) { // Ajusté pour la hauteur des multiplicateurs
                 // Déterminer le multiplicateur atteint
                 const multiplierIndex = Math.min(7, Math.max(0, Math.floor(posX / multiplierWidth)));
                 const selectedMultiplier = multipliers[multiplierIndex];
                 
-                // Mettre en évidence le multiplicateur sélectionné
+                // Animation d'arrivée
+                puck.style.transition = 'top 0.3s ease-out';
+                puck.style.top = `${boardRect.height - 80}px`;
+                
+                // Mettre en évidence le multiplicateur sélectionné avec une animation
                 multiplierDivs.forEach((div, index) => {
                     if (index === multiplierIndex) {
                         div.style.backgroundColor = '#f1c40f';
                         div.style.color = 'black';
                         div.style.fontWeight = 'bold';
-                        div.style.transform = 'scale(1.1)';
+                        div.style.transform = 'translateY(-10px) scale(1.1)';
+                        div.style.boxShadow = '0 -10px 20px rgba(241, 196, 15, 0.5)';
+                        div.style.borderTop = '3px solid #f1c40f';
+                        div.style.zIndex = '50';
                     }
                 });
                 
+                // Jouer un son de victoire
+                playSound('win');
+                
                 // Traitement du résultat
-                setTimeout(() => {
+                setTimeout(async () => {
                     if (selectedMultiplier === "DOUBLE") {
                         // Cas spécial: doubler tous les multiplicateurs et relancer
+                        
+                        // Animation pour doubler les valeurs
+                        let animationPromises = [];
+                        
                         multiplierDivs.forEach((div, index) => {
                             if (multipliers[index] !== "DOUBLE") {
-                                multipliers[index] *= 2;
-                                div.textContent = `x${multipliers[index]}`;
-                                div.style.backgroundColor = '#3498db';
+                                animationPromises.push(new Promise(resolve => {
+                                    // Animer la transition
+                                    div.style.transform = 'scale(1.2)';
+                                    div.style.transition = 'all 0.5s ease';
+                                    
+                                    setTimeout(() => {
+                                        // Mettre à jour la valeur
+                                        multipliers[index] *= 2;
+                                        div.textContent = `x${multipliers[index]}`;
+                                        div.style.backgroundColor = '#3498db';
+                                        
+                                        // Revenir à la normale
+                                        setTimeout(() => {
+                                            div.style.transform = 'scale(1)';
+                                            resolve();
+                                        }, 300);
+                                    }, 200);
+                                }));
                             }
                         });
                         
-                        // Message pour le DOUBLE
+                        // Attendre que toutes les animations soient terminées
+                        await Promise.all(animationPromises);
+                        
+                        // Message pour le DOUBLE avec animation
                         const doubleMessage = document.createElement('div');
                         doubleMessage.innerHTML = `
-                            <div style="text-align: center; background: rgba(0,0,0,0.8); padding: 2rem; border-radius: 20px; box-shadow: 0 0 30px rgba(241, 196, 15, 0.7);">
-                                <h2 style="color: #f1c40f; font-size: 2.5rem; margin-bottom: 1rem;">DOUBLE!</h2>
+                            <div style="text-align: center; background: rgba(0,0,0,0.9); padding: 2rem; border-radius: 20px; box-shadow: 0 0 30px rgba(241, 196, 15, 0.7); transform: scale(0); transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);">
+                                <h2 style="color: #f1c40f; font-size: 2.5rem; margin-bottom: 1rem; text-shadow: 0 0 10px rgba(241, 196, 15, 0.5);">DOUBLE!</h2>
                                 <p style="font-size: 1.5rem; margin-bottom: 1.5rem;">Tous les multiplicateurs sont doublés!</p>
-                                <button class="bonus-btn" id="continue-pachinko">CONTINUER</button>
+                                <button class="bonus-btn" id="continue-pachinko" style="background: linear-gradient(to right, #f39c12, #f1c40f); animation: pulse-button 2s infinite; font-size: 1.2rem; padding: 1rem 2rem;">CONTINUER</button>
                             </div>
                         `;
                         doubleMessage.style.position = 'absolute';
@@ -1041,19 +1384,44 @@ function setupPachinko(container) {
                         
                         container.appendChild(doubleMessage);
                         
+                        // Animer l'apparition
+                        setTimeout(() => {
+                            doubleMessage.querySelector('div').style.transform = 'scale(1)';
+                        }, 50);
+                        
                         // Relancer le palet après un délai
                         document.getElementById('continue-pachinko').addEventListener('click', () => {
-                            doubleMessage.remove();
-                            posX = boardRect.width / 2;
-                            posY = 0;
-                            velocityX = 0;
-                            velocityY = 2;
+                            // Animation de disparition
+                            doubleMessage.querySelector('div').style.transform = 'scale(0)';
                             
-                            puck.style.left = `${posX}px`;
-                            puck.style.top = `${posY}px`;
-                            
-                            // Relancer l'animation
-                            requestAnimationFrame(animate);
+                            setTimeout(() => {
+                                doubleMessage.remove();
+                                
+                                // Réinitialiser le palet
+                                puck.style.transition = 'none';
+                                posX = boardRect.width / 2;
+                                posY = 0;
+                                velocityX = 0;
+                                velocityY = 2;
+                                
+                                puck.style.left = `${posX}px`;
+                                puck.style.top = `${posY}px`;
+                                puck.style.transform = 'translateX(-50%)';
+                                
+                                // Supprimer toutes les traces
+                                trails.forEach(trail => trail.remove());
+                                trails = [];
+                                
+                                // Réinitialiser l'apparence des multiplicateurs
+                                multiplierDivs.forEach(div => {
+                                    div.style.transform = '';
+                                    div.style.boxShadow = '';
+                                    div.style.borderTop = '3px solid rgba(255, 255, 255, 0.2)';
+                                });
+                                
+                                // Relancer l'animation
+                                requestAnimationFrame(animate);
+                            }, 500);
                         });
                     } else {
                         // Calculer et afficher les gains
@@ -1062,17 +1430,40 @@ function setupPachinko(container) {
                         const winAmount = betAmount * selectedMultiplier;
                         
                         // Ajouter le gain au solde
-                        gameState.balance += winAmount;
+                        await serverUpdateTransaction(winAmount, true);
                         gameState.lastWin = winAmount;
                         
+                        // Mettre à jour le solde dans la base de données
+                        await updateBalanceInDatabase(gameState.balance, 0, true);
+                        
+                        // Créer l'animation de victoire avec confettis
                         const resultDiv = document.createElement('div');
                         resultDiv.innerHTML = `
-                            <div style="text-align: center; background: rgba(0,0,0,0.8); padding: 2rem; border-radius: 20px; box-shadow: 0 0 30px rgba(241, 196, 15, 0.7);">
-                                <h2 style="color: #f1c40f; font-size: 2.5rem; margin-bottom: 1rem;">FÉLICITATIONS!</h2>
+                            <div class="win-result" style="text-align: center; background: rgba(0,0,0,0.9); padding: 2rem; border-radius: 20px; box-shadow: 0 0 30px rgba(241, 196, 15, 0.7); transform: scale(0); transition: transform 0.5s cubic-bezier(0.175, 0.885, 0.32, 1.275);">
+                                <h2 style="color: #f1c40f; font-size: 2.5rem; margin-bottom: 1rem; text-shadow: 0 0 10px rgba(241, 196, 15, 0.5);">FÉLICITATIONS!</h2>
                                 <p style="font-size: 1.5rem; margin-bottom: 1rem;">Multiplicateur: <span style="color: #f1c40f; font-weight: bold;">x${selectedMultiplier}</span></p>
-                                <p style="font-size: 1.8rem; margin-bottom: 1.5rem;">Vous avez gagné <span style="color: #f1c40f; font-weight: bold;">${winAmount}€</span>!</p>
-                                <button class="bonus-btn" id="close-bonus">CONTINUER</button>
+                                <p style="font-size: 1.8rem; margin-bottom: 1.5rem;">Vous avez gagné <span style="color: #f1c40f; font-weight: bold; animation: pulse-win 1s infinite alternate;">${winAmount}€</span>!</p>
+                                <button class="bonus-btn" id="close-bonus" style="background: linear-gradient(to right, #f39c12, #f1c40f); animation: pulse-button 2s infinite; font-size: 1.2rem; padding: 1rem 2rem;">CONTINUER</button>
                             </div>
+                            <style>
+                                @keyframes pulse-win {
+                                    0% { text-shadow: 0 0 10px rgba(241, 196, 15, 0.5); }
+                                    100% { text-shadow: 0 0 20px rgba(241, 196, 15, 0.8); }
+                                }
+                                
+                                .confetti {
+                                    position: absolute;
+                                    width: 10px;
+                                    height: 10px;
+                                    pointer-events: none;
+                                    animation: fall linear;
+                                }
+                                
+                                @keyframes fall {
+                                    0% { transform: translateY(-100px) rotate(0deg); opacity: 1; }
+                                    100% { transform: translateY(100vh) rotate(720deg); opacity: 0; }
+                                }
+                            </style>
                         `;
                         resultDiv.style.position = 'absolute';
                         resultDiv.style.top = '50%';
@@ -1084,11 +1475,39 @@ function setupPachinko(container) {
                         
                         container.appendChild(resultDiv);
                         
+                        // Animer l'apparition
+                        setTimeout(() => {
+                            resultDiv.querySelector('.win-result').style.transform = 'scale(1)';
+                            
+                            // Ajouter des confettis
+                            for (let i = 0; i < 50; i++) {
+                                setTimeout(() => {
+                                    const confetti = document.createElement('div');
+                                    confetti.className = 'confetti';
+                                    confetti.style.left = Math.random() * 100 + '%';
+                                    confetti.style.backgroundColor = ['#f1c40f', '#e74c3c', '#3498db', '#2ecc71', '#9b59b6'][Math.floor(Math.random() * 5)];
+                                    confetti.style.animationDuration = (3 + Math.random() * 2) + 's';
+                                    document.body.appendChild(confetti);
+                                    
+                                    // Supprimer les confettis après leur animation
+                                    setTimeout(() => {
+                                        confetti.remove();
+                                    }, 5000);
+                                }, Math.random() * 500);
+                            }
+                        }, 50);
+                        
                         // Fermer le jeu bonus
                         document.getElementById('close-bonus').addEventListener('click', () => {
-                            document.getElementById('bonus-overlay').classList.remove('active');
-                            resetForNextRound();
-                            updateUI();
+                            // Animation de disparition
+                            resultDiv.querySelector('.win-result').style.transform = 'scale(0)';
+                            
+                            setTimeout(() => {
+                                document.getElementById('bonus-overlay').classList.remove('active');
+                                resultDiv.remove();
+                                resetForNextRound();
+                                updateUI();
+                            }, 500);
                         });
                     }
                 }, 1000);
@@ -1321,7 +1740,7 @@ function setupCrazyTime(container) {
                             const hasColorMatch = selectedColor === winningColor;
                             
                             // Traitement du résultat
-                            setTimeout(() => {
+                            setTimeout(async () => {
                                 if (winningMultiplier === "DOUBLE" || winningMultiplier === "TRIPLE") {
                                     // Cas spécial: multiplier tous les multiplicateurs et relancer
                                     const multiplier = winningMultiplier === "DOUBLE" ? 2 : 3;
@@ -1375,8 +1794,11 @@ function setupCrazyTime(container) {
                                     }
                                     
                                     // Ajouter le gain au solde
-                                    gameState.balance += winAmount;
+                                    await serverUpdateTransaction(winAmount, true);
                                     gameState.lastWin = winAmount;
+                                    
+                                    // Mettre à jour le solde dans la base de données
+                                    await updateBalanceInDatabase(gameState.balance, 0, true);
                                     
                                     // Afficher le résultat
                                     const resultDiv = document.createElement('div');
@@ -1457,6 +1879,12 @@ function resetForNextRound() {
     // Réactiver le bouton spin
     document.getElementById('spin-btn').disabled = false;
     document.getElementById('spin-btn').style.opacity = "1";
+    
+    // Réactiver le bouton remiser (s'il y a des mises précédentes)
+    if (gameState.previousTotalBet > 0) {
+        document.getElementById('rebet-btn').disabled = false;
+        document.getElementById('rebet-btn').style.opacity = "1";
+    }
     
     // Réinitialiser les paris
     resetBets();
